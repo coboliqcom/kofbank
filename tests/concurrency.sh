@@ -70,13 +70,31 @@ rm -f /tmp/kf4_*
 
 echo "== 5) concurrent full transfer lifecycle (money conservation) =="
 new_home
+rm -f /tmp/kf5_*.log
 b0=$(bank 'ledger.balance|A00000000001' | awk -F= '/^ledger=/{print $2}' | tr -d ' ')
 mkbar
-xfer() { local n=$1 T
+xfer() { local n=$1 T rc k st
+  local L=/tmp/kf5_$n.log
   T=$(bank "txn.create|TRANSFER|A00000000001|A00000000002|100000|BRL|m|S|tcr|TX$n" | awk -F= '/^id=/{print $2}' | tr -d ' ')
-  bank "txn.authorize|$T|S|tcr|A$n" >/dev/null; bank "txn.post|$T|S|tcr|P$n" >/dev/null; bank "txn.settle|$T|S|tcr|S$n" >/dev/null; }
+  echo "n=$n id=$T" > "$L"
+  rc=$(bank "txn.authorize|$T|S|tcr|A$n" | grep '^rc=' | cut -d= -f2); echo "authorize=$rc" >> "$L"
+  rc=$(bank "txn.post|$T|S|tcr|P$n" | grep '^rc=' | cut -d= -f2); echo "post=$rc" >> "$L"
+  if [ "$rc" != "00" ]; then
+    # timed-out/uncertain post: product's exactly-once completion path
+    rc=$(bank "txn.recover|$T|S|tcr|R$n" | grep '^rc=' | cut -d= -f2); echo "recover=$rc" >> "$L"
+  fi
+  for k in 1 2 3; do
+    rc=$(bank "txn.settle|$T|S|tcr|S$n" | grep '^rc=' | cut -d= -f2); echo "settle$k=$rc" >> "$L"
+    st=$(bank "txn.get|$T" | grep '^status=' | cut -d= -f2)
+    { [ "$rc" = "00" ] || [ "$st" = "ST" ]; } && break
+    sleep 1
+  done
+}
 for i in $(seq 1 8); do ( while [ ! -f "$BARRIER/go" ]; do :; done; xfer $i ) & done
 sleep 0.1; go; wait; rmbbar
+cps=0
+for f in /tmp/kf5_*.log; do id=$(awk '$1 ~ /^n=/{sub("id=","",$2); print $2}' "$f"); [ -n "$id" ] && [ "$(bank "txn.get|$id" | grep -c 'status=ST')" = "1" ] && cps=$((cps+1)); done
+chk "all 8 settled ST" "$cps" "8"
 b1=$(bank 'ledger.balance|A00000000001' | awk -F= '/^ledger=/{print $2}' | tr -d ' ')
 b2=$(bank 'ledger.balance|A00000000002' | awk -F= '/^ledger=/{print $2}' | tr -d ' ')
 chk "A1 net -800000 (no lost update)" "$b1" "9200000.00"
@@ -84,6 +102,7 @@ chk "A2 net +800000 (no lost update)" "$b2" "800000.00"
 chk "conservation (A1+A2 == opening)" "$(python3 -c "print(float('$b1')+float('$b2')==float('$b0'))")" "True"
 imb=$(bank 'ledger.trial' | grep 'imbalance=' | awk -F= '{print $2}' | tr -d ' ')
 chk "trial imbalance 0.00" "${imb:-0.00}" "0.00"
+rm -f /tmp/kf5_*.log
 
 echo "== 6) crash after balance then recover (exactly-once) =="
 new_home

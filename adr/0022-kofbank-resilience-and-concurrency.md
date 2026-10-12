@@ -171,7 +171,8 @@ plus the existing reconciliation verdicts decide what happened.
 Test gate. `tests/concurrency.sh` (also `make concurrency-test`; part of
 `make test`) drives independently launched OS processes against one shared data
 directory behind a flag-file barrier, plus deterministic `KOF_CRASH` seams and a
-`build/lockhelper` native driver; 44 checks, `passed=44 failed=0`, stable over
+`build/lockhelper` native driver; 44 checks at first recording, `passed=44
+failed=0`, stable over
 repeated runs and under the loaded `make test` sequence:
 1. 12 same-instant distinct-requestId creates → 12 unique ids, 12 durable
    records (no lost create — the Finding-6 failure mode is gone).
@@ -199,6 +200,14 @@ repeated runs and under the loaded `make test` sequence:
     inspection: unique durable ids, replay = 1 record, `seq_TRANSACTION.dat`
     equals the highest minted id, no new journal/posting lines, trial 0.00,
     zero locks left, `ops.inspect` not `CORRUPT`.
+Update (2026-10-12): scenario 5 hardened to 45 checks after a 1-in-3 intermittent
+under heavy foreign machine load (one 90s-timeout SIGKILL of a lifecycle call).
+The kill left balances conserved and the trial balanced (safety held); the
+timeout was a liveness artifact of external CPU contention, and the old test
+discarded per-step rc evidence. xfer now logs every step rc, completes an
+uncertain post through the product's exactly-once `txn.recover`, retries settle
+under the same requestId (replay-safe), and asserts `status=ST` for all 8.
+45/45 stable over 3 consecutive runs with load average ~3.
 
 Scope caveat. The primitive is validated on local ext4, single host, GnuCOBOL
 3.1.2. On network/distributed filesystems (NFS/GPFS) `flock` semantics differ
