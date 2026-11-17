@@ -53,6 +53,10 @@ To understand why this repository is fundamentally compromised, one must first d
    * Program B places its 120 cm stencil over coordinate X and starts writing with a thick black marker!
    * The first 12 cm lands in Program A's window... **and the remaining 108 cm scribbles all over the adjacent contracts, car keys, and balance ledgers lying on the desk!**
    * This is a **Linkage Stride Buffer Overrun**: Program B literally smashes return pointers and adjacent memory variables on the stack.
+6. **The "Copy-Booking" Axiom: Copybook = Memory Reservation Booking Scheme (MRBS):**
+   In modern software, developers think `COPY` is just a casual `import` statement. But in mainframe banking and hardware memory architecture, **`book` means `booking` (rezerwacja/księgowanie)**:
+   * A **Copybook** in reality is a **Memory Reservation Booking Scheme (MRBS)**: copying an exact, immutable physical memory buffer reservation specification into every program.
+   * When you bypass the Copybook and manually type inline buffer sizes, you break the memory reservation booking (`breaks the booking`). It is the equivalent of showing up to a hotel with a reservation booking for 1 single bed (12B), and attempting to force a 120-person tour group inside (120B). Adjacent rooms are physically demolished.
 
 ---
 
