@@ -27,6 +27,35 @@ However, a deep cross-program invariant audit using **CobolIQ** and **DecodeIQ C
 
 ---
 
+## 💡 The Desk & Cutout Lens Analogy: How COBOL Memory Actually Works
+
+To understand why this repository is fundamentally compromised, one must first dismantle a modern programmer's illusion: **in COBOL, variables do not "hold values" the way they do in Python, Java, or TypeScript.**
+
+### The Pedagogical Mental Model:
+
+1. **The Desk = Physical RAM (Working-Storage / Flat Buffer):**
+   Imagine a massive mahogany desk. It is flat, contiguous, and unyielding. On the desk surface lies raw ink (bytes). The desk itself has no concept of "objects", "dynamic strings", or "classes".
+2. **The Variable = A Sheet of Paper with a Cutout Window (Lens):**
+   A variable declaration (`01 WS-ID PIC X(12)`) does **not** instantiate an object. It simply lays a piece of cardboard on the desk with a window cut out to **exactly 12 centimeters**:
+   * You can only see the ink lying directly beneath that 12 cm cutout.
+   * If you try to write a 24 cm string into it (`MOVE WS-A TO WS-ID`), only the first 12 cm marks the desk. The remaining 12 cm **vanishes into thin air** (`TRUNC`).
+3. **`REDEFINES` = Swapping the Cutout Window on the Exact Same Desk Area:**
+   If you want to view a date differently, you don't copy data. You lift the cardboard with an 8 cm window (`DATE-FULL PIC X(8)`) and lay down another cardboard with three smaller windows: 4 cm for year, 2 cm for month, 2 cm for day. The desk surface beneath never moved.
+4. **Encoding (`DISPLAY` vs `COMP-3`) = Colored Optical Filter on the Window:**
+   * Look through transparent glass (`DISPLAY`): you read ASCII/EBCDIC text characters.
+   * Look through a polarized financial filter (`COMP-3`): ink spots are decoded in decimal pairs (Packed Decimal).
+   * If someone sprays text spaces (`0x40`) over the desk, and you view it through the `COMP-3` filter, the arithmetic processor short-circuits instantly: **`S0C7 Data Exception Abend`**.
+5. **The Vibe-Coding Catastrophe (Why 103 Memory Nukes Happened):**
+   Here is what happened across KofBank:
+   * Program A tells Program B: *"Hey, look at my desk at coordinate X"* (passes a memory pointer via `CALL ... USING`).
+   * Program A laid down a small cutout window of **12 cm** (`WS-ALABEL`).
+   * Program B arrives carrying a massive industrial stencil of **120 cm** (`01 LS-BEFORE PIC X(120)`)!
+   * Program B places its 120 cm stencil over coordinate X and starts writing with a thick black marker!
+   * The first 12 cm lands in Program A's window... **and the remaining 108 cm scribbles all over the adjacent contracts, car keys, and balance ledgers lying on the desk!**
+   * This is a **Linkage Stride Buffer Overrun**: Program B literally smashes return pointers and adjacent memory variables on the stack.
+
+---
+
 ## 1. 🚨 103 Critical Memory Nukes (Linkage Stride Buffer Overruns)
 
 When an LLM vibe-codes COBOL programs in isolated sessions, it frequently invents arbitrary linkage parameter lengths for called subprograms. In COBOL, **parameters are passed by reference (pointers to RAM buffers)** without runtime bounds checks. 
