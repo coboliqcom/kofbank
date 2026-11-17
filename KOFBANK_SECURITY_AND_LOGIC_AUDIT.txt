@@ -1,0 +1,369 @@
+================================================================================
+KOFBANK COBOL CORE - ARCHITECTURE, ARITHMETIC & CONCURRENCY AUDIT REPORT
+================================================================================
+Target Repository : https://github.com/melmonfre/kofbank
+Target Branch     : main (commit: melmonfre)
+Author / Contact  : mel <amelissariver@gmail.com>
+Audited Modules   : cobol/interest, cobol/ledger, cobol/limits, cobol/accounts,
+                    cobol/transactions, cobol/pix
+Audited Files     : 254 programs / 56,582 lines of COBOL
+================================================================================
+
+Hi Mel,
+
+First and foremost: incredible achievement on kofbank! Building a 254-program,
+domain-driven banking core in pure COBOL targeting GnuCOBOL with clean VSAM-like
+abstractions is a massive, highly disciplined engineering project. The Unix/KISS
+separation between foundation, ledger, accounts, limits, and batch is very well
+thought out.
+
+While reviewing the code and running invariant checks across execution paths,
+we identified several critical arithmetic, state consistency, and concurrency
+anomalies that will cause issues during integration testing or concurrent runs.
+
+Here is the technical breakdown with exact file locations, line numbers, and
+suggested remediations:
+
+================================================================================
+CRITICAL BUG #1: Exponential Daily Explosion in Compound Interest
+================================================================================
+Location: cobol/interest/BINT.cbl (Lines 49–67)
+
+Code:
+--------------------------------------------------------------------------------
+DO-COMPOUND.
+    ...
+    COMPUTE WS-RATE = INT-BPS / 10000
+    MOVE WS-RATE TO INT-RATE
+    MOVE INT-AMOUNT TO WS-BASE
+    COMPUTE WS-WORK ROUNDED =
+        WS-BASE * (1 + WS-RATE) ** INT-DAYS
+    SUBTRACT WS-BASE FROM WS-WORK
+    MOVE WS-WORK TO INT-INTEREST.
+--------------------------------------------------------------------------------
+
+The Flaw:
+- INT-BPS represents an annualized basis point rate (e.g., 1000 bps = 10% = 0.10).
+- The formula elevates (1 + WS-RATE) directly to INT-DAYS without dividing the
+  annual rate by the day-count basis (INT-BASIS = 360 or 365).
+- In addition, unlike DO-SIMPLE, DO-COMPOUND completely ignores INT-BASIS validation.
+
+Impact:
+- Over a 30-day period with a 10% annual rate:
+  (1 + 0.10)^30 = 17.4494x initial principal (1,644.9% monthly interest).
+- Over a 365-day annual term:
+  (1 + 0.10)^365 = 1.28 * 10^14x initial principal.
+- Triggers immediate arithmetic overflow and runtime abend (missing ON SIZE ERROR).
+
+Suggested Fix:
+Compute the effective daily rate first before compounding:
+--------------------------------------------------------------------------------
+    IF INT-BASIS NOT = 360 AND INT-BASIS NOT = 365
+        MOVE "20" TO INT-RC
+        MOVE "BASIS MUST BE 360 OR 365" TO INT-MSG
+        GOBACK
+    END-IF
+    COMPUTE WS-RATE = INT-BPS / 10000
+    COMPUTE WS-DAILY-RATE = WS-RATE / INT-BASIS
+    COMPUTE WS-WORK ROUNDED =
+        WS-BASE * (1 + WS-DAILY-RATE) ** INT-DAYS
+        ON SIZE ERROR
+            MOVE "21" TO INT-RC
+            MOVE "NUMERIC OVERFLOW IN COMPOUNDING" TO INT-MSG
+            GOBACK
+    END-COMPUTE
+--------------------------------------------------------------------------------
+
+
+================================================================================
+CRITICAL BUG #2: State Contamination & Permanent Drain on Rejected Limits
+================================================================================
+Location: cobol/limits/BLIM.cbl (Lines 112–135)
+
+Code:
+--------------------------------------------------------------------------------
+DO-CONSUME.
+    ...
+    PERFORM LOAD-USAGE
+    ADD LIM-AMOUNT TO LIM-USED
+    MOVE WS-BIZDATE TO LU-DATE
+    MOVE LIM-SCOPE TO LU-SCOPE
+    MOVE LIM-KEY TO LU-KEY
+    MOVE LIM-PERIOD TO LU-PERIOD
+    MOVE LIM-USED TO LU-USED
+    PERFORM SAVE-USAGE
+    COMPUTE LIM-AVAILABLE = LIM-LIMIT - LIM-USED
+    IF LIM-LIMIT > 0 AND LIM-USED > LIM-LIMIT
+        MOVE "20" TO LIM-RC
+        MOVE "LIMIT EXCEEDED" TO LIM-MSG
+    ELSE
+        MOVE "00" TO LIM-RC
+        MOVE "CONSUMED" TO LIM-MSG
+    END-IF.
+--------------------------------------------------------------------------------
+
+The Flaw:
+- DO-CONSUME adds LIM-AMOUNT to LIM-USED and immediately persists it to disk
+  via PERFORM SAVE-USAGE before checking whether the limit was exceeded!
+- If LIM-USED > LIM-LIMIT, it returns return code "20" (LIMIT EXCEEDED), but the
+  inflated usage is already written to /var/data/limuse.idx.
+
+Impact:
+- Every rejected transaction that exceeds a customer's limit permanently
+  consumes their limit allowance on disk. Subsequent requests fail even further.
+
+Suggested Fix:
+Check limit headroom BEFORE saving:
+--------------------------------------------------------------------------------
+    IF LIM-LIMIT > 0 AND (LIM-USED + LIM-AMOUNT) > LIM-LIMIT
+        MOVE "20" TO LIM-RC
+        MOVE "LIMIT EXCEEDED" TO LIM-MSG
+        EXIT PARAGRAPH
+    END-IF
+    ADD LIM-AMOUNT TO LIM-USED
+    MOVE LIM-USED TO LU-USED
+    PERFORM SAVE-USAGE
+    COMPUTE LIM-AVAILABLE = LIM-LIMIT - LIM-USED
+    MOVE "00" TO LIM-RC
+    MOVE "CONSUMED" TO LIM-MSG.
+--------------------------------------------------------------------------------
+
+
+================================================================================
+CRITICAL BUG #3: Lost-Update Concurrency Anomaly on Account Balances
+================================================================================
+Location: cobol/ledger/BGLPST.cbl (Lines 244–265)
+
+Code:
+--------------------------------------------------------------------------------
+    READ BAL-FILE
+    EVALUATE WS-BAL-ST
+        WHEN "00"
+            ADD WS-DELTA TO BAL-LEDGER
+            COMPUTE BAL-AVAILABLE = BAL-LEDGER - BAL-BLOCKED
+            MOVE BK-JRN-BIZDATE TO BAL-UPDATED
+            ADD 1 TO BAL-SEQ
+            REWRITE BAL-REC
+--------------------------------------------------------------------------------
+
+The Flaw:
+- BAL-FILE (acctbal.idx) is opened in I-O mode without record locking
+  (READ ... WITH LOCK).
+- Although BAL-SEQ is incremented, there is no optimistic concurrency check
+  comparing the in-memory sequence number against storage upon rewrite.
+
+Impact:
+- If two processes concurrently post to the same account (e.g. simultaneous
+  inbound PIX payment and ATM withdrawal), process B will overwrite the record
+  written by process A. Funds posted by process A vanish from the ledger balance.
+
+Suggested Fix:
+Use explicit record locking or optimistic sequence verification:
+--------------------------------------------------------------------------------
+    READ BAL-FILE WITH LOCK
+    ...
+    REWRITE BAL-REC
+--------------------------------------------------------------------------------
+
+
+================================================================================
+CRITICAL BUG #4: Auto-Settlement of Unknown In-Flight PIX SPI Transfers
+================================================================================
+Location: cobol/pix/BPXSPI.cbl (Lines 195–207)
+
+Code:
+--------------------------------------------------------------------------------
+    IF SP-RESULT = "UNKNOWN"
+        ADD 1 TO SP-QUERIES
+        IF SP-QUERIES > 1
+            MOVE "SETTLED" TO SP-RESULT
+            MOVE "SETTLED" TO SI-RESULT
+            MOVE "00" TO SI-RC
+            MOVE "SPI SETTLEMENT RESOLVED" TO SI-MSG
+            REWRITE SP-REC
+        ELSE
+            REWRITE SP-REC
+            MOVE "24" TO SI-RC
+            MOVE "SPI SETTLEMENT STILL UNKNOWN" TO SI-MSG
+        END-IF
+--------------------------------------------------------------------------------
+
+The Flaw:
+- If a Central Bank SPI query returns UNKNOWN, querying the status a second time
+  (SP-QUERIES > 1) forces the transfer into "SETTLED".
+
+Impact:
+- Any network glitch or timeout from the Central Bank SPI gateway that is queried
+  twice automatically treats unconfirmed funds as settled and credited. In production
+  clearing, this creates unreconciled exposure against the Central Bank account.
+
+Suggested Fix:
+Retain UNKNOWN / PENDING state until an explicit Central Bank settlement message
+or reversal/timeout event is received:
+--------------------------------------------------------------------------------
+    IF SP-RESULT = "UNKNOWN"
+        ADD 1 TO SP-QUERIES
+        REWRITE SP-REC
+        MOVE "24" TO SI-RC
+        MOVE "SPI SETTLEMENT PENDING CENTRAL BANK CONFIRMATION" TO SI-MSG
+    END-IF
+--------------------------------------------------------------------------------
+
+
+================================================================================
+CRITICAL BUG #5: Broken Two-Phase Commit (2PC) on Account Opening
+================================================================================
+Location: cobol/accounts/BACOPN.cbl (Lines 110–118 & 257–282)
+
+Code:
+--------------------------------------------------------------------------------
+    PERFORM CREATE-ACCOUNT
+    IF LS-RC NOT = "00"
+        GOBACK
+    END-IF
+    IF LS-INITIAL > 0
+        PERFORM POST-INITIAL
+    END-IF
+    PERFORM FINALIZE
+    GOBACK.
+...
+POST-INITIAL.
+    ...
+    CALL "BGLPST" USING BK-JRN-PARMS BK-PST-TABLE
+    IF BK-JRN-RC NOT = "00"
+        MOVE BK-JRN-RC TO LS-RC
+        MOVE BK-JRN-MSG TO LS-MSG
+    END-IF.
+...
+FINALIZE.
+    CALL "BAUD" USING BK-AUD-PARMS
+    MOVE "ACCOUNT.CREATED.v1" TO BK-EVT-TYPE
+    CALL "BEVT" USING BK-EVT-PARMS
+--------------------------------------------------------------------------------
+
+The Flaw:
+- CREATE-ACCOUNT writes the new account record to /var/data/acct.idx.
+- If POST-INITIAL fails (e.g. GL balance posting error or journal lock), control
+  falls through into FINALIZE, which logs audit success and publishes
+  "ACCOUNT.CREATED.v1".
+
+Impact:
+- Leaves a ghost account persisted in storage without its initial deposit
+  balance in the GL ledger, while downstream consumers receive an event
+  stating the account was successfully opened.
+
+Suggested Fix:
+Implement compensating reversal/rollback if initial deposit fails:
+--------------------------------------------------------------------------------
+    IF LS-INITIAL > 0
+        PERFORM POST-INITIAL
+        IF LS-RC NOT = "00"
+            PERFORM ROLLBACK-ACCOUNT
+            GOBACK
+        END-IF
+    END-IF
+--------------------------------------------------------------------------------
+
+
+================================================================================
+CRITICAL BUG #6: Missing Limit & Available Exposure Validation in Credit Charges
+================================================================================
+Location: cobol/transactions/BTXNVAL.cbl (Lines 118–142)
+
+Code:
+--------------------------------------------------------------------------------
+V-CHARGE.
+    ...
+    MOVE "GET" TO CE-OP
+    MOVE LFC-FACILITY TO CE-FAC-ID
+    CALL "BCRUPD" USING BK-CR-EXP-PARMS
+    IF CE-RC NOT = "00"
+        MOVE "20" TO VAL-RC
+        MOVE "FACILITY NOT FOUND" TO VAL-MSG
+        GOBACK
+    END-IF
+    IF CE-STATUS = "CLO" OR CE-STATUS = "CANC" OR
+       CE-STATUS = "CAN"
+        MOVE "20" TO VAL-RC
+        MOVE "FACILITY CLOSED" TO VAL-MSG
+    END-IF.
+--------------------------------------------------------------------------------
+
+The Flaw:
+- V-CHARGE retrieves the credit facility via BCRUPD and validates status (not closed),
+  but NEVER verifies whether LFC-AMOUNT exceeds the available credit line.
+
+Impact:
+- Credit facility cards or loans can be charged without bound, bypassing credit
+  exposure limits completely.
+
+Suggested Fix:
+Verify available exposure:
+--------------------------------------------------------------------------------
+    IF CE-AVAILABLE < LFC-AMOUNT
+        MOVE "20" TO VAL-RC
+        MOVE "EXCEEDS CREDIT FACILITY LIMIT" TO VAL-MSG
+        GOBACK
+    END-IF
+--------------------------------------------------------------------------------
+
+
+================================================================================
+CRITICAL BUG #7: Hollow Fee Engine Return
+================================================================================
+Location: cobol/interest/BINT.cbl (Lines 68–76)
+
+Code:
+--------------------------------------------------------------------------------
+DO-FEE.
+    IF INT-FEE < 0
+        MOVE "20" TO INT-RC
+        MOVE "FEE MUST NOT BE NEGATIVE" TO INT-MSG
+        GOBACK
+    END-IF
+    MOVE "00" TO INT-RC
+    MOVE "FEE APPLIED" TO INT-MSG.
+--------------------------------------------------------------------------------
+
+The Flaw:
+- At program entry (line 16), INT-INTEREST is initialized to 0.
+- DO-FEE validates INT-FEE, sets RC="00", but never assigns INT-FEE to
+  INT-INTEREST or the linkage output area. Callers expecting the calculated
+  fee receive 0.00.
+
+Suggested Fix:
+--------------------------------------------------------------------------------
+    MOVE INT-FEE TO INT-INTEREST.
+--------------------------------------------------------------------------------
+
+
+================================================================================
+PERFORMANCE ISSUE #8: I/O Churn and Full-Scan Bottlenecks
+================================================================================
+Location: cobol/limits/BLIM.cbl (Lines 137–150 & 190–228)
+
+The Flaw:
+- Every limit operation opens, linearly scans, and closes /etc/limits.cfg line by line.
+- In addition, indexed usage files (LU-FILE) are opened and closed multiple times
+  per single transaction call.
+
+Impact:
+- Under batch or high-throughput concurrency, file descriptor thrashing and
+  repeated file opens degrade throughput by orders of magnitude.
+
+Suggested Fix:
+- Cache limits configuration in a static shared table in memory on first call,
+  or manage persistent file handles across transaction lifecycles.
+
+================================================================================
+SUMMARY
+================================================================================
+These findings are not stylistic; they represent core financial, state, and
+concurrency invariants. Addressing them will turn kofbank into an exceptionally
+robust, reference-grade banking simulator.
+
+Let us know if you would like pull requests for any of these modules.
+
+Best regards,
+CobolIQ Architecture Team
+================================================================================

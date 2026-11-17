@@ -1,4 +1,9 @@
 *.md
+!README.md
+!KOFBANK_CODE_CRIME_REPORT.md
+!kofbank_memory_map.md
+!kofbank_portfolio_memory.md
+!PR1_DESCRIPTION.md
 build/
 var/
 *.o

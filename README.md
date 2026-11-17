@@ -1,5 +1,8 @@
 # kofbank
 
+> ⚠️ **FORENSIC AUDIT ALERT:** *"Vibecoded? Cool. But don't use until you fix :)"*  
+> See the complete **[KofBank Forensic Audit & Code Crime Report](KOFBANK_CODE_CRIME_REPORT.md)** (103 memory nukes, 217 schema clashes, and 7 broken financial invariants detected by CobolIQ).
+
 Banking institution modeled as software. COBOL core first; Kof is the modern
 integration layer later. Local development runs on GnuCOBOL with VSAM-like
 indexed datasets; the design targets z/OS, CICS, VSAM, DB2, MQ and JCL.
